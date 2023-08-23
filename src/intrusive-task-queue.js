@@ -15,6 +15,12 @@
  */
 
 /**
+ * @template T {unknown}
+ * @typedef {T & {tq_sequence_: number, tq_prev_: QueuedTask<T>|null, tq_next_: QueuedTask<T>|null}} QueuedTask
+ */
+
+
+/**
  * This represents the overall task queuing order and is used for moving tasks
  * between task queues for priority changes.
  * @private
@@ -34,6 +40,7 @@ let nextSequence = 0;
  *  - tq_sequence_: The overall queueing order.
  *  - tq_prev_: A pointer to the previous task.
  *  - tq_next_: A pointer to the next task.
+ * @template T {unknown}
  */
 class IntrusiveTaskQueue {
   /**
@@ -42,13 +49,13 @@ class IntrusiveTaskQueue {
   constructor() {
     /**
      * @private
-     * @const {!Object}
+     * @type {QueuedTask<T> | null}
      */
     this.head_ = null;
 
     /**
      * @private
-     * @const {!Object}
+     * @type {QueuedTask<T> | null}
      */
     this.tail_ = null;
   }
@@ -58,25 +65,27 @@ class IntrusiveTaskQueue {
     return this.head_ == null;
   }
 
-  /** @param {!Object} task */
+  /** @param {T} task */
   push(task) {
     if (typeof task !== 'object') throw new TypeError('Task must be an Object');
 
-    task.tq_sequence_ = nextSequence++;
+    // Convert task T to QueuedTask<T> by adding queueing properties.
+    const queuedTask = /** @type {QueuedTask<T>} */ (task);
+    queuedTask.tq_sequence_ = nextSequence++;
 
     if (this.isEmpty()) {
-      task.tq_prev_ = null;
-      this.head_ = task;
+      queuedTask.tq_prev_ = null;
+      this.head_ = queuedTask;
     } else {
-      task.tq_prev_ = this.tail_;
-      this.tail_.tq_next_ = task;
+      queuedTask.tq_prev_ = this.tail_;
+      this.tail_.tq_next_ = queuedTask;
     }
 
-    task.tq_next_ = null;
-    this.tail_ = task;
+    queuedTask.tq_next_ = null;
+    this.tail_ = queuedTask;
   }
 
-  /** @return {?Object} The oldest task or null of the queue is empty. */
+  /** @return {?T} The oldest task or null of the queue is empty. */
   takeNextTask() {
     if (this.isEmpty()) return null;
     const task = this.head_;
@@ -89,8 +98,8 @@ class IntrusiveTaskQueue {
    * `selector` returns true . Tasks are insterted into this queue based on
    * their sequence number.
    *
-   * @param {!IntrusiveTaskQueue} sourceQueue
-   * @param {function(!Object): boolean} selector
+   * @param {!IntrusiveTaskQueue<T>} sourceQueue
+   * @param {function(!T): boolean} selector
    */
   merge(sourceQueue, selector) {
     if (typeof selector !== 'function') {
@@ -129,7 +138,7 @@ class IntrusiveTaskQueue {
    *
    * TODO(shaseley): consider removing this.
    *
-   * @return {!Array<!Object>}
+   * @return {!Array<!T>}
    */
   toArray() {
     let node = this.head_;
@@ -144,8 +153,8 @@ class IntrusiveTaskQueue {
   /**
    * Insert `task` into this queue directly after `parentTask`.
    * @private
-   * @param {!Object} task The task to insert.
-   * @param {?Object} parentTask The task preceding `task` in this queue, or
+   * @param {QueuedTask<T>} task The task to insert.
+   * @param {QueuedTask<T> | null} parentTask The task preceding `task` in this queue, or
    *    null if `task` should be inserted at the beginning.
    */
   insert_(task, parentTask) {
@@ -174,7 +183,7 @@ class IntrusiveTaskQueue {
 
   /**
    * @private
-   * @param {!Object} task
+   * @param {QueuedTask<T> | null} task
    */
   remove_(task) {
     if (task == null) throw new Error('Expected task to be non-null');

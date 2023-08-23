@@ -16,33 +16,7 @@
 
 import {SCHEDULER_PRIORITIES} from './scheduler-priorities.js';
 
-/**
- * Makes the controller's signal a TaskSignal by adding a read-only priority
- * property.
- * @private
- * @param {TaskController} controller
- */
-function makeTaskSignal(controller) {
-  const signal = controller.signal;
-  Object.defineProperties(signal, {
-    priority: {
-      get: function() {
-        return controller.priority_;
-      },
-      enumerable: true,
-    },
-    onprioritychange: {
-      value: null,
-      writable: true,
-      enumerable: true,
-    },
-  });
-  signal.addEventListener('prioritychange', (e) => {
-    if (signal.onprioritychange) {
-      signal.onprioritychange(e);
-    }
-  });
-}
+/** @typedef {import('../types/scheduler.d.ts').TaskPriority} TaskPriority */
 
 /**
  * Event type used for priority change events:
@@ -54,12 +28,12 @@ class TaskPriorityChangeEvent extends Event {
    * named 'prioritychange', which is the name used for events triggered by
    * TaskController.setPriority().
    *
-   * @param {?string} typeArg
-   * @param {{previousPriority: string}} init
+   * @param {string} typeArg
+   * @param {{previousPriority: TaskPriority}} [init]
    */
   constructor(typeArg, init) {
     if (!init || !SCHEDULER_PRIORITIES.includes(init.previousPriority)) {
-      throw new TypeError(`Invalid task priority: '${init.previousPriority}'`);
+      throw new TypeError(`Invalid task priority: '${init?.previousPriority}'`);
     }
     super(typeArg);
     this.previousPriority = init.previousPriority;
@@ -77,8 +51,11 @@ class TaskPriorityChangeEvent extends Event {
  * the priority property.
  */
 class TaskController extends AbortController {
+  /** @type {TaskSignal} */
+  signal = TaskController.makeTaskSignal_(this);
+
   /**
-   * @param {{priority: string}} init
+   * @param {{priority?: TaskPriority}} init
    */
   constructor(init = {}) {
     super();
@@ -96,7 +73,7 @@ class TaskController extends AbortController {
 
     /**
      * @private
-     * @type {string}
+     * @type {TaskPriority}
      */
     this.priority_ = priority;
 
@@ -105,13 +82,11 @@ class TaskController extends AbortController {
      * @type {boolean}
      */
     this.isPriorityChanging_ = false;
-
-    makeTaskSignal(this);
   }
 
   /**
    * Change the priority of all tasks associated with this controller's signal.
-   * @param {string} priority
+   * @param {TaskPriority} priority
    */
   setPriority(priority) {
     if (!SCHEDULER_PRIORITIES.includes(priority)) {
@@ -129,6 +104,37 @@ class TaskController extends AbortController {
     this.signal.dispatchEvent(e);
 
     this.isPriorityChanging_ = false;
+  }
+
+  /**
+  * Makes the controller's signal a TaskSignal by adding a read-only priority
+  * property.
+  * @private
+  * @param {TaskController} controller
+  * @return {TaskSignal}
+  */
+  static makeTaskSignal_(controller) {
+    const signal = controller.signal;
+    Object.defineProperties(signal, {
+      priority: {
+        get: function() {
+          return controller.priority_;
+        },
+        enumerable: true,
+      },
+      onprioritychange: {
+        value: null,
+        writable: true,
+        enumerable: true,
+      },
+    });
+    signal.addEventListener('prioritychange', (e) => {
+      if (signal.onprioritychange) {
+        signal.onprioritychange(e);
+      }
+    });
+
+    return signal;
   }
 }
 

@@ -14,24 +14,27 @@
  * limitations under the License.
  */
 
+/** @typedef {import('../types/scheduler.d.ts').SchedulerYieldOptions} SchedulerYieldOptions */
+/** @typedef {import('../types/scheduler.d.ts').TaskPriority} TaskPriority */
+
 /**
  * Returns a promise that is resolved in a new task. The resulting promise is
  * rejected if the associated signal is aborted. This uses scheduler.postTask()
  * to schedule continuations.
  *
- * @param {{signal: AbortSignal, priorty: string}} options
- * @return {!Promise<*>}
+ * @param {SchedulerYieldOptions} [options]
+ * @return {!Promise<void>}
  */
-function schedulerYield(options) {
+function schedulerYield(options = {}) {
   // Map scheduler priority to continuation priority. Use 'user-blocking' to get
   // similar scheduling behavior in the default case; leave 'background' alone
   // so the continuations have lower priority than non-scheduler tasks.
+  /** @param {TaskPriority=} priority */
   const continuationPriority = (priority) => {
     return !priority || priority == 'user-visible' ?
         'user-blocking' : priority;
   };
 
-  options = Object.assign({}, options);
   // Inheritance is not supported. Use default options instead.
   if (options.signal && options.signal == 'inherit') {
     delete options.signal;
@@ -49,7 +52,7 @@ function schedulerYield(options) {
   // Priority of the continuation, used to create the signal used for
   // scheduling.
   let priority = options.priority;
-  if (!priority && options.signal && options.signal.priority) {
+  if (!priority && options.signal && 'priority' in options.signal) {
     priority = options.signal.priority;
   }
   priority = continuationPriority(priority);
@@ -69,24 +72,29 @@ function schedulerYield(options) {
     controller: new self.TaskController({priority}),
 
     // 'abort' event handler added to `inputSignal`, if set, to propagate abort.
+    /** @type {(() => void)|null} */
     abortCallback: null,
 
     // 'prioritychange' event handler added to `inputSignal` to propagate
     // priority changes. Only set if `inputSignal` is a TaskSignal and a
     // fixed priority override wasn't provided.
+    /** @type {(() => void)|null} */
     priorityCallback: null,
 
     onTaskAborted: function() {
+      if (!this.inputSignal) return;
       this.controller.abort(this.inputSignal.reason);
       this.abortCallback = null;
     },
 
     onPriorityChange: function() {
+      if (!this.inputSignal || !('priority' in this.inputSignal)) return;
       this.controller.setPriority(
           continuationPriority(this.inputSignal.priority));
     },
 
     onTaskCompleted: function() {
+      if (!this.inputSignal) return;
       if (this.abortCallback) {
         this.inputSignal.removeEventListener('abort', this.abortCallback);
         this.abortCallback = null;
@@ -109,7 +117,7 @@ function schedulerYield(options) {
 
   // Set up 'prioritychange' event propagation. This is only relevant if the
   // signal is a TaskSignal and a fixed priority wasn't provided.
-  if (options.signal && options.signal.priority && !options.priority) {
+  if (options.signal && 'priority' in options.signal && !options.priority) {
     continuation.priorityCallback = () => {
       continuation.onPriorityChange();
     };

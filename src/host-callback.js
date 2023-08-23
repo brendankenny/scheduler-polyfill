@@ -16,6 +16,8 @@
 
 import {SCHEDULER_PRIORITIES} from './scheduler-priorities.js';
 
+/** @typedef {import('../types/scheduler.d.ts').TaskPriority} TaskPriority */
+
 /**
  * This class manages scheduling and running callbacks using postMessage.
  * @private
@@ -28,19 +30,19 @@ class PostMessageCallbackMananger {
   constructor() {
     /**
      * @private
-     * @const {!MessageChannel}
+     * @type {MessageChannel}
      */
     this.channel_ = new MessageChannel();
 
     /**
      * @private
-     * @const {MessagePort}
+     * @type {MessagePort}
      */
     this.sendPort_ = this.channel_.port2;
 
     /**
      * @private
-     * @const {!Object<number, function(): undefined>}
+     * @type {Record<number, () => undefined>}
      */
     this.messages_ = {};
 
@@ -77,7 +79,7 @@ class PostMessageCallbackMananger {
   /**
    * The onmessage handler, invoked when the postMessage runs.
    * @private
-   * @param {!Event} e
+   * @param {MessageEvent} e
    */
   onMessageReceived_(e) {
     const handle = e.data;
@@ -89,25 +91,29 @@ class PostMessageCallbackMananger {
   }
 }
 
+/** @type {PostMessageCallbackMananger|undefined} */
+let postMessageCallbackManangerInstance_;
+
 /**
  * Get the lazily initialized instance of PostMessageCallbackMananger, which
  * is initialized that way to avoid errors if MessageChannel is not available.
  *
- * @return {!PostMessageCallbackMananger}
+ * @return {PostMessageCallbackMananger}
  */
 function getPostMessageCallbackManager() {
-  if (!getPostMessageCallbackManager.instance_) {
-    getPostMessageCallbackManager.instance_ = new PostMessageCallbackMananger();
+  if (!postMessageCallbackManangerInstance_) {
+    postMessageCallbackManangerInstance_ = new PostMessageCallbackMananger();
   }
-  return getPostMessageCallbackManager.instance_;
+  return postMessageCallbackManangerInstance_;
 }
 
-/** @enum {number} */
-const CallbackType = {
+const CallbackTypes = /** @type {const} */ ({
   REQUEST_IDLE_CALLBACK: 0,
   SET_TIMEOUT: 1,
   POST_MESSAGE: 2,
-};
+});
+
+/** @typedef {CallbackTypes[keyof CallbackTypes]} CallbackType */
 
 /**
  * HostCallback is used for tracking host callbacks, both for the schedueler
@@ -117,7 +123,7 @@ const CallbackType = {
 class HostCallback {
   /**
    * @param {function(): undefined} callback
-   * @param {?string} priority The scheduler priority of the associated host
+   * @param {?TaskPriority} priority The scheduler priority of the associated host
    *     callback. This is used to determine which type of underlying API to
    *     use. This can be null if delay is set.
    * @param {number} delay An optional delay. Tasks with a delay will
@@ -129,7 +135,7 @@ class HostCallback {
 
     /**
      * @private
-     * @type {CallbackType}
+     * @type {CallbackType|null}
      */
     this.callbackType_ = null;
 
@@ -154,7 +160,7 @@ class HostCallback {
    * @return {boolean}
    */
   isIdleCallback() {
-    return this.callbackType_ === CallbackType.REQUEST_IDLE_CALLBACK;
+    return this.callbackType_ === CallbackTypes.REQUEST_IDLE_CALLBACK;
   }
 
   /**
@@ -162,7 +168,7 @@ class HostCallback {
    * @return {boolean}
    */
   isMessageChannelCallback() {
-    return this.callbackType_ === CallbackType.POST_MESSAGE;
+    return this.callbackType_ === CallbackTypes.POST_MESSAGE;
   }
 
   /**
@@ -171,15 +177,16 @@ class HostCallback {
   cancel() {
     if (this.canceled_) return;
     this.canceled_ = true;
+    if (this.handle_ === null) return;
 
     switch (this.callbackType_) {
-      case CallbackType.REQUEST_IDLE_CALLBACK:
+      case CallbackTypes.REQUEST_IDLE_CALLBACK:
         cancelIdleCallback(this.handle_);
         break;
-      case CallbackType.SET_TIMEOUT:
+      case CallbackTypes.SET_TIMEOUT:
         clearTimeout(this.handle_);
         break;
-      case CallbackType.POST_MESSAGE:
+      case CallbackTypes.POST_MESSAGE:
         getPostMessageCallbackManager().cancelCallback(this.handle_);
         break;
       default:
@@ -189,10 +196,10 @@ class HostCallback {
 
   /**
    * @private
-   * @param {?string} priority The scheduler priority of the associated host
+   * @param {?TaskPriority} priority The scheduler priority of the associated host
    *     callback. This is used to determine which type of underlying API to
    *     use. This can be null if delay is set.
-   * @param {number} delay An optional delay. Tasks with a delay will
+   * @param {number=} delay An optional delay. Tasks with a delay will
    *     ignore the `priority` parameter and use setTimeout.
    */
   schedule_(priority, delay) {
@@ -200,7 +207,7 @@ class HostCallback {
     // the appropriate priority when the callback runs. If the delay <= 0 and
     // MessageChannel is available, we use postMessage below.
     if (delay && delay > 0) {
-      this.callbackType_ = CallbackType.SET_TIMEOUT;
+      this.callbackType_ = CallbackTypes.SET_TIMEOUT;
       this.handle_ = setTimeout(() => {
         this.runCallback_();
       }, delay);
@@ -209,13 +216,13 @@ class HostCallback {
 
     // This shouldn't happen since Scheduler checks the priority before creating
     // a HostCallback, but fail loudly in case it does.
-    if (!SCHEDULER_PRIORITIES.includes(priority)) {
+    if (!priority || !SCHEDULER_PRIORITIES.includes(priority)) {
       throw new TypeError(`Invalid task priority : ${priority}`);
     }
 
     if (priority === 'background' &&
         typeof requestIdleCallback === 'function') {
-      this.callbackType_ = CallbackType.REQUEST_IDLE_CALLBACK;
+      this.callbackType_ = CallbackTypes.REQUEST_IDLE_CALLBACK;
       this.handle_ = requestIdleCallback(() => {
         this.runCallback_();
       });
@@ -224,7 +231,7 @@ class HostCallback {
 
     // Use MessageChannel if avaliable.
     if (typeof MessageChannel === 'function') {
-      this.callbackType_ = CallbackType.POST_MESSAGE;
+      this.callbackType_ = CallbackTypes.POST_MESSAGE;
       // TODO: Consider using setTimeout in the background so tasks are
       // throttled. One caveat here is that requestIdleCallback may not be
       // throttled.
@@ -236,7 +243,7 @@ class HostCallback {
 
     // Some JS environments may not support MessageChannel.
     // This makes setTimeout the only option.
-    this.callbackType_ = CallbackType.SET_TIMEOUT;
+    this.callbackType_ = CallbackTypes.SET_TIMEOUT;
     this.handle_ = setTimeout(() => {
       this.runCallback_();
     });

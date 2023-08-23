@@ -18,6 +18,24 @@ import {HostCallback} from './host-callback.js';
 import {IntrusiveTaskQueue as TaskQueue} from './intrusive-task-queue.js';
 import {SCHEDULER_PRIORITIES} from './scheduler-priorities.js';
 
+/** @typedef {import('../types/scheduler.d.ts').SchedulerPostTaskOptions} SchedulerPostTaskOptions */
+/** @typedef {import('../types/scheduler.d.ts').SchedulerYieldOptions} SchedulerYieldOptions */
+/** @typedef {import('../types/scheduler.d.ts').TaskPriority} TaskPriority */
+/**
+ * @template [T=unknown]
+ * @typedef Task
+ * @property {() => T} callback
+ * @property {{signal?: AbortSignal | TaskSignal, priority?: TaskPriority, delay: number}} options
+ * @property {(value: unknown) => void} resolve
+ * @property {(reason: unknown) => void} reject
+ * @property {HostCallback|null} hostCallback
+ * @property {(() => void)|null} abortCallback
+ * @property {() => void} onTaskCompleted
+ * @property {() => void} onTaskAborted
+ * @property {() => boolean} isAborted
+ * @property {boolean} [isContinuation]
+ */
+
 /**
  * Polyfill of the scheduler API: https://wicg.github.io/scheduling-apis/.
  */
@@ -28,16 +46,17 @@ class Scheduler {
    */
   constructor() {
     /**
-     * @const {Object<string, !TaskQueue[]>}
+     * @type {Record<TaskPriority, [TaskQueue<Task>, TaskQueue<Task>]>}
      *
      * Continuation and task queue for each priority, in that order.
      */
-    this.queues_ = {};
-    SCHEDULER_PRIORITIES.forEach((priority) => {
-      this.queues_[priority] = [new TaskQueue(), new TaskQueue()];
-    });
+    this.queues_ = {
+      'user-blocking': [new TaskQueue(), new TaskQueue()],
+      'user-visible': [new TaskQueue(), new TaskQueue()],
+      'background': [new TaskQueue(), new TaskQueue()],
+    };
 
-    /*
+    /**
      * We only schedule a single host callback, which can be a setTimeout,
      * requestIdleCallback, or postMessage, which will run the oldest, highest
      * priority task.
@@ -56,7 +75,7 @@ class Scheduler {
      * entries are (key = signal, value = current priority). When we encounter
      * a new TaskSignal (an AbortSignal with a priority property), we listen for
      * priority changes so we can move tasks between queues accordingly.
-     * @const {!WeakMap<!AbortSignal, string>}
+     * @type {!WeakMap<!TaskSignal, TaskPriority>}
      */
     this.signals_ = new WeakMap();
   }
@@ -65,19 +84,25 @@ class Scheduler {
    * Returns a promise that is resolved in a new task. The resulting promise is
    * rejected if the associated signal is aborted.
    *
-   * @param {{signal: AbortSignal, priorty: string}} options
-   * @return {!Promise<*>}
+   * @param {SchedulerYieldOptions} [options]
+   * @return {!Promise<void>}
    */
-  yield(options) {
-    options = Object.assign({}, options);
+  yield(options = {}) {
+    /** @type {SchedulerPostTaskOptions} */
+    const continuationOptions = {};
+
     // Inheritance is not supported. Use default options instead.
-    if (options.signal && options.signal == 'inherit') {
-      delete options.signal;
+    if (options.signal && options.signal !== 'inherit') {
+      continuationOptions.signal = options.signal;
     }
-    if (options.priority && options.priority == 'inherit') {
-      options.priority = 'user-visible';
+    if (options.priority) {
+      if (options.priority === 'inherit') {
+        continuationOptions.priority = 'user-visible';
+      } else {
+        continuationOptions.priority = options.priority;
+      }
     }
-    return this.postTaskOrContinuation_(() => {}, options, true);
+    return this.postTaskOrContinuation_(() => {}, continuationOptions, true);
   }
 
   /**
@@ -86,25 +111,27 @@ class Scheduler {
    * promise is rejected if the callback throws an exception, or if the
    * associated signal is aborted.
    *
-   * @param {function(): *} callback
-   * @param {{signal: AbortSignal, priorty: string, delay: number}} options
-   * @return {!Promise<*>}
+   * @template T
+   * @param {function(): T} callback
+   * @param {SchedulerPostTaskOptions} [options]
+   * @return {!Promise<T>}
    */
-  postTask(callback, options) {
+  postTask(callback, options = {}) {
     return this.postTaskOrContinuation_(callback, options, false);
   }
 
   /**
    * Common scheduling logic for postTask and yield.
    *
-   * @param {function(): *} callback
-   * @param {{signal: AbortSignal, priorty: string, delay: number}} options
-   * @param {boolean} isContinuation
-   * @return {!Promise<*>}
+   * @template T
+   * @param {function(): T} callback
+   * @param {SchedulerPostTaskOptions} rawOptions
+   * @param {boolean=} isContinuation
+   * @return {!Promise<T>}
    */
-  postTaskOrContinuation_(callback, options, isContinuation) {
+  postTaskOrContinuation_(callback, rawOptions, isContinuation) {
     // Make a copy since we modify some of the options.
-    options = Object.assign({}, options);
+    const options = Object.assign({delay: 0}, rawOptions);
 
     if (options.signal !== undefined) {
       // Non-numeric options cannot be null for this API. Also make sure we can
@@ -115,7 +142,7 @@ class Scheduler {
             `'signal' is not a valid 'AbortSignal'`));
       }
       // If this is a TaskSignal, make sure the priority is valid.
-      if (options.signal && options.signal.priority &&
+      if ('priority' in options.signal &&
           !SCHEDULER_PRIORITIES.includes(options.signal.priority)) {
         return Promise.reject(new TypeError(
             `Invalid task priority: '${options.signal.priority}'`));
@@ -143,15 +170,16 @@ class Scheduler {
           `'delay' must be a positive number.`));
     }
 
+    /** @type Task<T> */
     const task = {
       callback,
       options,
 
       /** The resolve function from the associated Promise.  */
-      resolve: null,
+      resolve: () => {},
 
       /** The reject function from the associated Promise.  */
-      reject: null,
+      reject: () => {},
 
       /** The pending HostCallback, which is set iff this is a delayed task. */
       hostCallback: null,
@@ -175,13 +203,17 @@ class Scheduler {
           this.hostCallback.cancel();
           this.hostCallback = null;
         }
+        if (!this.options.signal || !this.abortCallback) {
+          // Can't ever happen, but worth enforcing?
+          throw new Error('Aborting a task without a signal');
+        }
         this.options.signal.removeEventListener('abort', this.abortCallback);
         this.abortCallback = null;
         this.reject(this.options.signal.reason);
       },
 
       isAborted: function() {
-        return this.options.signal && this.options.signal.aborted;
+        return Boolean(this.options.signal && this.options.signal.aborted);
       },
 
       isContinuation,
@@ -199,7 +231,7 @@ class Scheduler {
 
   /**
    * @private
-   * @param {!Object} task
+   * @param {!Task} task
    */
   schedule_(task) {
     // Handle tasks that have already been aborted or might be aborted in the
@@ -233,7 +265,7 @@ class Scheduler {
   /**
    * Callback invoked when a delayed task's timeout expires.
    * @private
-   * @param {!Object} task
+   * @param {!Task} task
    */
   onTaskDelayExpired_(task) {
     // We need to queue the task in the appropriate queue, most importantly
@@ -251,9 +283,9 @@ class Scheduler {
   }
 
   /**
-   * Callback invoked when a priortychange event is raised for `signal`.
+   * Callback invoked when a prioritychange event is raised for `signal`.
    * @private
-   * @param {!AbortSignal} signal
+   * @param {!TaskSignal} signal
    */
   onPriorityChange_(signal) {
     const oldPriority = this.signals_.get(signal);
@@ -303,7 +335,7 @@ class Scheduler {
     }
 
     // Either the priority of the new task is compatible with the pending host
-    // callback, or it's a lower priorty (we handled the other case above). In
+    // callback, or it's a lower priority (we handled the other case above). In
     // either case, the pending callback is still valid.
     if (this.pendingHostCallback_) return;
 
@@ -317,16 +349,17 @@ class Scheduler {
    * If the priority comes from the associated signal, this will set up an event
    * listener to listen for priority changes.
    * @private
-   * @param {!Object} task
+   * @param {!Task} task
    */
   pushTask_(task) {
     // If an explicit priority was provided, we use that. Otherwise if a
     // TaskSignal was provided, we get the priority from that. If neither a
     // priority or TaskSignal was provided, we default to 'user-visible'.
+    /** @type {TaskPriority} */
     let priority;
     if (task.options.priority) {
       priority = task.options.priority;
-    } else if (task.options.signal && task.options.signal.priority) {
+    } else if (task.options.signal && 'priority' in task.options.signal) {
       priority = task.options.signal.priority;
     } else {
       priority = 'user-visible';
@@ -340,7 +373,7 @@ class Scheduler {
 
     // Subscribe to priority change events if this is the first time we're
     // learning about this signal.
-    if (task.options.signal && task.options.signal.priority) {
+    if (task.options.signal && 'priority' in task.options.signal) {
       const signal = task.options.signal;
       if (!this.signals_.has(signal)) {
         signal.addEventListener('prioritychange', () => {
@@ -372,6 +405,8 @@ class Scheduler {
       // Note: `task` will only be null if the queue is empty, which should not
       // be the case if we found the priority of the next task to run.
       task = this.queues_[priority][type].takeNextTask();
+      // Task won't be null from priority check above, but double check for tsc.
+      if (task === null) return;
     } while (task.isAborted());
 
     try {
@@ -387,7 +422,7 @@ class Scheduler {
   /**
    * Get the priority and type of the next task or continuation to run.
    * @private
-   * @return {{priority: ?string, type: number}} Returns the priority and type
+   * @return {{priority: ?TaskPriority, type: number}} Returns the priority and type
    *    of the next continuation or task to run, or null if all queues are
    *    empty.
    */

@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
+/** @typedef {import('../types/scheduler.d.ts').TaskPriority} TaskPriority */
+
 /**
  * The list of scheduler priorities in order from highest to lowest.
- * @const {!Array<string>}
+ * @type {!Array<TaskPriority>}
  */
 const SCHEDULER_PRIORITIES = ['user-blocking', 'user-visible', 'background'];
 
